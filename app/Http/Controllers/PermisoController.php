@@ -10,38 +10,42 @@ use Illuminate\Support\Facades\DB;
 
 class PermisoController extends Controller
 {
-    // Listar todos los permisos existentes en BD
     public function index()
     {
-        return response()->json(Permiso::all());
-    }
+        $permisos = Permiso::orderBy('modulo')->orderBy('accion')->get();
 
-    // Nuevos permisos detectados (en código pero no en BD)
-    public function nuevosDetectados()
-    {
-        $nuevos = PermisoDetector::getNewPermisosDetected();
-        return response()->json($nuevos);
-    }
-
-    // Sincronizar: insertar los nuevos permisos en BD (sin asignar a roles)
-    public function sincronizar()
-    {
-        $nuevos = PermisoDetector::syncPermisos();
         return response()->json([
-            'message' => 'Permisos sincronizados',
-            'nuevos' => $nuevos
+            'message' => 'Listado de permisos.',
+            'data' => $permisos,
         ]);
     }
 
-    /**
-     * Asignación masiva sobre los nuevos permisos detectados.
-     * Body JSON:
-     * {
-     *   "accion": "asignar_a_rol", "rol_id": 1
-     *   "accion": "clonar_desde_modulo", "modulo_origen": "usuarios", "modulo_destino": "incidencias"
-     *   "accion": "asignar_por_reglas", "reglas": [{"rol_id":1, "acciones":["ver","crear"]}, ...]
-     * }
-     */
+    public function nuevosDetectados()
+    {
+        $nuevos = PermisoDetector::getNewPermisosDetected();
+
+        return response()->json([
+            'message' => count($nuevos) > 0
+                ? 'Se detectaron ' . count($nuevos) . ' permisos nuevos en el código.'
+                : 'No hay permisos nuevos pendientes de sincronizar.',
+            'data' => array_values($nuevos),
+        ]);
+    }
+
+    public function sincronizar()
+    {
+        $nuevos = PermisoDetector::syncPermisos();
+
+        $cantidad = count($nuevos);
+
+        return response()->json([
+            'message' => $cantidad > 0
+                ? "{$cantidad} permiso(s) sincronizado(s) exitosamente."
+                : 'No hay permisos nuevos para sincronizar.',
+            'data' => $nuevos,
+        ]);
+    }
+
     public function asignacionMasiva(Request $request)
     {
         $request->validate([
@@ -49,21 +53,41 @@ class PermisoController extends Controller
         ]);
 
         $nuevosPermisos = PermisoDetector::getNewPermisosDetected();
+
         if (empty($nuevosPermisos)) {
-            return response()->json(['message' => 'No hay nuevos permisos para asignar'], 200);
+            return response()->json([
+                'message' => 'No hay nuevos permisos pendientes para asignar.',
+            ]);
         }
 
-        // Primero sincronizamos para que existan en BD
-        $insertados = PermisoDetector::syncPermisos(); // array de modelos Permiso
-
         $accion = $request->accion;
+
+        $validations = [
+            'asignar_a_rol' => [
+                'rol_id' => 'required|integer|exists:roles,id',
+            ],
+            'clonar_desde_modulo' => [
+                'modulo_origen' => 'required|string',
+                'modulo_destino' => 'required|string',
+            ],
+            'asignar_por_reglas' => [
+                'reglas' => 'required|array|min:1',
+                'reglas.*.rol_id' => 'required|integer|exists:roles,id',
+                'reglas.*.acciones' => 'required|array|min:1',
+            ],
+        ];
+
+        if (isset($validations[$accion])) {
+            $request->validate($validations[$accion]);
+        }
+
+        $insertados = PermisoDetector::syncPermisos();
 
         DB::beginTransaction();
         try {
             switch ($accion) {
                 case 'asignar_a_rol':
-                    $rolId = $request->rol_id;
-                    $rol = Rol::findOrFail($rolId);
+                    $rol = Rol::findOrFail($request->rol_id);
                     $permisosIds = collect($insertados)->pluck('id');
                     $rol->permisos()->syncWithoutDetaching($permisosIds);
                     break;
@@ -71,17 +95,16 @@ class PermisoController extends Controller
                 case 'clonar_desde_modulo':
                     $moduloOrigen = $request->modulo_origen;
                     $moduloDestino = $request->modulo_destino;
-                    // Obtener los roles que tienen permisos del módulo origen
+
                     $permisosOrigen = Permiso::where('modulo', $moduloOrigen)->pluck('id');
                     $rolesConPermisos = DB::table('roles_permisos')
                         ->whereIn('permiso_id', $permisosOrigen)
-                        ->select('rol_id')
-                        ->distinct()
-                        ->pluck('rol_id');
-                    // Para cada rol, asignar los nuevos permisos del módulo destino
+                        ->select('rol_id')->distinct()->pluck('rol_id');
+
                     $permisosDestino = Permiso::where('modulo', $moduloDestino)
                         ->whereIn('id', collect($insertados)->pluck('id'))
                         ->pluck('id');
+
                     foreach ($rolesConPermisos as $rolId) {
                         $rol = Rol::find($rolId);
                         if ($rol) {
@@ -91,24 +114,32 @@ class PermisoController extends Controller
                     break;
 
                 case 'asignar_por_reglas':
-                    $reglas = $request->reglas; // array de {rol_id, acciones[]}
-                    foreach ($reglas as $regla) {
+                    foreach ($request->reglas as $regla) {
                         $rol = Rol::find($regla['rol_id']);
                         if (!$rol) continue;
+
                         $accionesPermitidas = $regla['acciones'];
-                        // Filtrar los nuevos permisos cuya acción esté en $accionesPermitidas
                         $idsAsignar = collect($insertados)
                             ->filter(fn($p) => in_array($p->accion, $accionesPermitidas))
                             ->pluck('id');
+
                         $rol->permisos()->syncWithoutDetaching($idsAsignar);
                     }
                     break;
             }
+
             DB::commit();
-            return response()->json(['message' => 'Asignación masiva completada']);
+
+            return response()->json([
+                'message' => 'Asignación masiva completada exitosamente.',
+            ]);
         } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json(['error' => $e->getMessage()], 500);
+
+            return response()->json([
+                'message' => 'Error al realizar la asignación masiva.',
+                'error' => $e->getMessage(),
+            ], 500);
         }
     }
 }

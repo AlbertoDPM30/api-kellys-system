@@ -14,12 +14,10 @@ return new class extends Migration
         Schema::create('permisos', function (Blueprint $table) {
             $table->id();
             $table->string('nombre_tecnico')->unique();
-            $table->string('modulo')->required();
-            $table->string('accion')->required();
-            $table->string('descripcion')->required();
+            $table->string('modulo');
+            $table->string('accion');
+            $table->string('descripcion');
             $table->timestamps();
-            // $table->timestamps('created_at');
-            // $table->timestamps('updated_at')->default('CURRENT_TIMESTAMP');
         });
     }
 

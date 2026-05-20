@@ -7,6 +7,7 @@ use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Laravel\Sanctum\HasApiTokens;
 use Laravel\Sanctum\NewAccessToken;
+use DateTimeInterface;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use App\Models\Rol;
@@ -73,7 +74,7 @@ class User extends Authenticatable
             'expires_at' => $expiresAt,
         ]);
         
-        return new NewAccessToken($token, $plainTextToken.'|'.$token->id);
+        return new NewAccessToken($token, $token->getKey().'|'.$plainTextToken);
     }
 
     protected function generateTokenString(): string
